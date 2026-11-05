@@ -108,6 +108,7 @@
         <div><h1>My Notebook</h1><div class="subtitle">A quiet place for your thoughts</div></div>
       </div>
       <div class="top-actions hidden" id="topActions">
+        <button class="btn" id="importBtn">Import old notes</button>
         <button class="btn" id="exportBtn">Export backup</button>
         <button class="btn" id="lockBtn">Lock</button>
       </div>
@@ -116,20 +117,17 @@
     <section class="lock-card" id="lockScreen">
       <div class="lock-icon">⌑</div>
       <h2 id="lockTitle">Welcome to your notebook</h2>
-      <p id="lockDescription">Set a passcode to protect your notebook. You will use it whenever you open this notebook in this browser.</p>
+      <p id="lockDescription">Enter your PIN to open notes stored online, from any device.</p>
       <form id="lockForm">
-        <label for="passcode" id="passLabel">Create a passcode</label>
-        <input id="passcode" type="password" autocomplete="current-password" minlength="6" maxlength="128" required placeholder="At least 6 characters">
-        <div id="confirmWrap">
-          <label for="confirmPasscode">Confirm passcode</label>
-          <input id="confirmPasscode" type="password" autocomplete="new-password" minlength="6" maxlength="128" placeholder="Enter it again">
-        </div>
-        <button class="btn primary" id="unlockBtn" type="submit">Create notebook</button>
+        <label for="passcode" id="passLabel">Enter PIN</label>
+        <input id="passcode" type="password" autocomplete="off" inputmode="numeric" maxlength="12" required placeholder="Enter PIN">
+        
+        <button class="btn primary" id="unlockBtn" type="submit">Open notebook</button>
       </form>
       <div class="status" id="lockStatus" role="status"></div>
-      <div class="restore-row"><button class="text-btn" id="restoreBtn">Restore from a backup file</button></div>
+      
       <input type="file" id="restoreInput" accept="application/json,.json" class="hidden">
-      <div class="notice">Your notes are encrypted in this browser. Your passcode cannot be reset or recovered. Keep a backup somewhere safe.</div>
+      <div class="notice">Notes are stored online in a publicly writable database. The PIN is only a convenience screen lock; it does not secure the data. Do not store sensitive information.</div>
     </section>
 
     <section class="workspace hidden" id="workspace">
@@ -137,7 +135,7 @@
         <div class="side-head"><strong>Your notes</strong><button class="new-btn" id="newBtn">＋ New note</button></div>
         <input class="search" id="searchInput" type="search" placeholder="Search notes..." aria-label="Search notes">
         <div class="note-list" id="noteList"></div>
-        <div class="sidebar-foot"><p class="hint">Notes are saved on this browser and encrypted with your passcode.</p></div>
+        <div class="sidebar-foot"><p class="hint">Notes are stored online and available on other devices. Save your changes before switching notes.</p></div>
       </aside>
       <section class="editor" id="editorPanel">
         <div class="empty-editor" id="emptyEditor"><div><strong>Your notebook is empty</strong>Create a note to get started.</div></div>
@@ -158,343 +156,71 @@
   </main>
 
   <script>
-    (() => {
-      "use strict";
-      const STORAGE_KEY = "my-notebook-encrypted-v1";
-      const ITERATIONS = 310000;
-      const $ = (id) => document.getElementById(id);
-      let vault = null;
-      let cryptoKey = null;
-      let notes = [];
-      let activeId = null;
-      let dirty = false;
-
-      const lockScreen = $("lockScreen");
-      const workspace = $("workspace");
-      const lockForm = $("lockForm");
-      const passInput = $("passcode");
-      const confirmInput = $("confirmPasscode");
-
-      function bytesToBase64(bytes) {
-        let binary = "";
-        bytes.forEach(byte => binary += String.fromCharCode(byte));
-        return btoa(binary);
+  (() => {
+    "use strict";
+    const PROJECT_URL = "https://oiyclihezrhhvncyumds.supabase.co";
+    const PUBLISHABLE_KEY = "sb_publishable_zKqOp6hILe9SbOtvrysyrw_hN5NLNA_";
+    const PIN = "0928"; // UI-only convenience PIN, visible in page source
+    const STORAGE_KEY = "my-notebook-encrypted-v1";
+    const API = PROJECT_URL + "/rest/v1/notes";
+    const $ = id => document.getElementById(id);
+    let notes = [], activeId = null, dirty = false, busy = false;
+    const dateFmt = value => new Intl.DateTimeFormat(undefined,{year:"numeric",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}).format(new Date(value));
+    function setDirty(value) {dirty=value;$("saveState").textContent=value?"Unsaved changes":"All changes saved";}
+    function confirmDiscard() {return !dirty || confirm("Discard unsaved changes?");}
+    function errorMessage(e) {alert(e.message || String(e));}
+    async function request(path="", options={}) {
+      const response=await fetch(API+path,{...options,headers:{apikey:PUBLISHABLE_KEY,Authorization:"Bearer "+PUBLISHABLE_KEY,"Content-Type":"application/json",...(options.headers||{})}});
+      if(!response.ok)throw new Error("Supabase returned "+response.status+": "+(await response.text()).slice(0,400));
+      if(response.status===204)return null;
+      const text=await response.text();return text?JSON.parse(text):null;
+    }
+    const fromRow=r=>({id:r.id,title:r.title||"",body:r.content||"",createdAt:Date.parse(r.created_at),updatedAt:Date.parse(r.updated_at)});
+    const toRow=n=>({id:n.id,title:n.title||"Untitled note",content:n.body||"",created_at:new Date(n.createdAt).toISOString(),updated_at:new Date(n.updatedAt).toISOString()});
+    function refreshNoteList(){
+      const list=$("noteList"),q=$("searchInput").value.trim().toLowerCase();list.replaceChildren();
+      const filtered=[...notes].sort((a,b)=>b.updatedAt-a.updatedAt).filter(n=>(n.title+" "+n.body).toLowerCase().includes(q));
+      if(!filtered.length){const div=document.createElement("div");div.className="empty-list";div.textContent=q?"No matching notes.":"No notes yet. Create your first note.";list.append(div);return;}
+      for(const n of filtered){const button=document.createElement("button");button.className="note-item"+(n.id===activeId?" active":"");
+        for(const [cls,value] of [["note-title",n.title||"Untitled note"],["note-preview",(n.body||"").replace(/\s+/g," ").slice(0,100)||"No additional text"],["note-date","Edited "+dateFmt(n.updatedAt)]]){const el=document.createElement("span");el.className=cls;el.textContent=value;button.append(el);}
+        button.addEventListener("click",async()=>{if(!confirmDiscard())return;try{await loadNotes();openNote(n.id);}catch(e){errorMessage(e);}});list.append(button);
       }
-      function base64ToBytes(value) {
-        const binary = atob(value);
-        return Uint8Array.from(binary, char => char.charCodeAt(0));
-      }
-      function randomBytes(length) {
-        const bytes = new Uint8Array(length);
-        crypto.getRandomValues(bytes);
-        return bytes;
-      }
-      async function deriveKey(passcode, salt, iterations = ITERATIONS) {
-        const material = await crypto.subtle.importKey(
-          "raw", new TextEncoder().encode(passcode), "PBKDF2", false, ["deriveKey"]
-        );
-        return crypto.subtle.deriveKey(
-          { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
-          material,
-          { name: "AES-GCM", length: 256 },
-          false,
-          ["encrypt", "decrypt"]
-        );
-      }
-      async function encryptNotes(data, key, salt) {
-        const iv = randomBytes(12);
-        const encoded = new TextEncoder().encode(JSON.stringify(data));
-        const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoded);
-        return {
-          app: "my-notebook",
-          version: 1,
-          algorithm: "AES-GCM",
-          kdf: "PBKDF2-SHA-256",
-          iterations: ITERATIONS,
-          salt: bytesToBase64(salt),
-          iv: bytesToBase64(iv),
-          data: bytesToBase64(new Uint8Array(encrypted))
-        };
-      }
-      async function decryptVault(record, passcode) {
-        if (!record || record.app !== "my-notebook" || record.version !== 1) {
-          throw new Error("This is not a supported notebook backup.");
-        }
-        const salt = base64ToBytes(record.salt);
-        const iv = base64ToBytes(record.iv);
-        const key = await deriveKey(passcode, salt, record.iterations || ITERATIONS);
-        const plain = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv }, key, base64ToBytes(record.data)
-        );
-        const parsed = JSON.parse(new TextDecoder().decode(plain));
-        if (!Array.isArray(parsed.notes)) throw new Error("The notebook data is invalid.");
-        return { key, notes: parsed.notes };
-      }
-      function showStatus(message, isError = false) {
-        $("lockStatus").textContent = message;
-        $("lockStatus").style.color = isError ? "#a13e36" : "";
-      }
-      function formatDate(value) {
-        return new Intl.DateTimeFormat(undefined, {
-          year: "numeric", month: "short", day: "numeric",
-          hour: "numeric", minute: "2-digit"
-        }).format(new Date(value));
-      }
-      function escapePreview(text) {
-        return (text || "").replace(/\s+/g, " ").trim();
-      }
-      function setDirty(value) {
-        dirty = value;
-        $("saveState").textContent = value ? "Unsaved changes" : "All changes saved";
-        $("saveState").style.color = value ? "#a16d28" : "";
-      }
-      function refreshNoteList() {
-        const list = $("noteList");
-        const query = $("searchInput").value.trim().toLowerCase();
-        list.replaceChildren();
-        const filtered = [...notes]
-          .sort((a, b) => b.updatedAt - a.updatedAt)
-          .filter(note => `${note.title || ""} ${note.body || ""}`.toLowerCase().includes(query));
-        if (!filtered.length) {
-          const empty = document.createElement("div");
-          empty.className = "empty-list";
-          empty.textContent = query ? "No matching notes." : "No notes yet. Create your first note.";
-          list.appendChild(empty);
-          return;
-        }
-        for (const note of filtered) {
-          const button = document.createElement("button");
-          button.className = "note-item" + (note.id === activeId ? " active" : "");
-          const title = document.createElement("span");
-          title.className = "note-title";
-          title.textContent = note.title || "Untitled note";
-          const preview = document.createElement("span");
-          preview.className = "note-preview";
-          preview.textContent = escapePreview(note.body) || "No additional text";
-          const date = document.createElement("span");
-          date.className = "note-date";
-          date.textContent = "Edited " + formatDate(note.updatedAt);
-          button.append(title, preview, date);
-          button.addEventListener("click", () => {
-            if (!confirmDiscard()) return;
-            openNote(note.id);
-          });
-          list.appendChild(button);
-        }
-      }
-      function confirmDiscard() {
-        return !dirty || window.confirm("You have unsaved changes. Discard them?");
-      }
-      function openNote(id) {
-        const note = notes.find(item => item.id === id);
-        if (!note) return;
-        activeId = id;
-        $("emptyEditor").classList.add("hidden");
-        $("editForm").classList.remove("hidden");
-        $("noteTitle").value = note.title || "";
-        $("noteBody").value = note.body || "";
-        $("dateMeta").textContent = `Created ${formatDate(note.createdAt)} · Last edited ${formatDate(note.updatedAt)}`;
-        $("charCount").textContent = `${(note.body || "").length.toLocaleString()} characters`;
-        setDirty(false);
-        refreshNoteList();
-      }
-      async function persist() {
-        if (!cryptoKey || !vault) throw new Error("Notebook is locked.");
-        const updated = await encryptNotes({ notes }, cryptoKey, base64ToBytes(vault.salt));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-        vault = updated;
-      }
-      async function saveActiveNote() {
-        if (!activeId) return;
-        const note = notes.find(item => item.id === activeId);
-        if (!note) return;
-        const oldUpdated = note.updatedAt;
-        note.title = $("noteTitle").value.trim() || "Untitled note";
-        note.body = $("noteBody").value;
-        note.updatedAt = Date.now();
-        $("saveBtn").disabled = true;
-        try {
-          await persist();
-          $("dateMeta").textContent = `Created ${formatDate(note.createdAt)} · Last edited ${formatDate(note.updatedAt)}`;
-          setDirty(false);
-          refreshNoteList();
-        } catch (error) {
-          note.updatedAt = oldUpdated;
-          showStatus(error.message, true);
-          window.alert("Could not save this note. " + error.message);
-        } finally {
-          $("saveBtn").disabled = false;
-        }
-      }
-      async function createNote() {
-        if (!confirmDiscard()) return;
-        const now = Date.now();
-        const note = { id: crypto.randomUUID(), title: "", body: "", createdAt: now, updatedAt: now };
-        notes.push(note);
-        activeId = note.id;
-        try {
-          await persist();
-          openNote(note.id);
-          $("noteTitle").focus();
-        } catch (error) {
-          notes = notes.filter(item => item.id !== note.id);
-          window.alert("Could not create the note. " + error.message);
-        }
-      }
-      async function deleteActiveNote() {
-        if (!activeId || !window.confirm("Delete this note permanently? This cannot be undone.")) return;
-        notes = notes.filter(note => note.id !== activeId);
-        activeId = null;
-        try {
-          await persist();
-          $("editForm").classList.add("hidden");
-          $("emptyEditor").classList.remove("hidden");
-          setDirty(false);
-          refreshNoteList();
-        } catch (error) {
-          window.alert("Could not delete the note. " + error.message);
-        }
-      }
-      async function unlock(passcode) {
-        const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
-        const result = await decryptVault(stored, passcode);
-        vault = stored;
-        cryptoKey = result.key;
-        notes = result.notes;
-        activeId = null;
-        lockScreen.classList.add("hidden");
-        workspace.classList.remove("hidden");
-        $("topActions").classList.remove("hidden");
-        $("emptyEditor").classList.remove("hidden");
-        $("editForm").classList.add("hidden");
-        refreshNoteList();
-      }
-      function lock() {
-        if (dirty && !window.confirm("You have unsaved changes. Lock without saving?")) return;
-        cryptoKey = null;
-        notes = [];
-        activeId = null;
-        dirty = false;
-        workspace.classList.add("hidden");
-        $("topActions").classList.add("hidden");
-        lockScreen.classList.remove("hidden");
-        const hasVault = !!localStorage.getItem(STORAGE_KEY);
-        $("lockTitle").textContent = hasVault ? "Welcome back" : "Welcome to your notebook";
-        $("lockDescription").textContent = hasVault
-          ? "Enter your passcode to unlock your encrypted notes."
-          : "Set a passcode to protect your notebook. You will use it whenever you open this notebook in this browser.";
-        $("passLabel").textContent = hasVault ? "Passcode" : "Create a passcode";
-        $("confirmWrap").classList.toggle("hidden", hasVault);
-        $("unlockBtn").textContent = hasVault ? "Unlock notebook" : "Create notebook";
-        passInput.value = "";
-        confirmInput.value = "";
-        showStatus("");
-      }
-      function downloadBackup() {
-        if (!vault) return;
-        const blob = new Blob([JSON.stringify(vault, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `my-notebook-backup-${new Date().toISOString().slice(0, 10)}.json`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-      }
-      async function restoreBackup(file) {
-        try {
-          const content = JSON.parse(await file.text());
-          if (content.app !== "my-notebook" || content.version !== 1 || !content.salt || !content.iv || !content.data) {
-            throw new Error("That file does not look like a valid notebook backup.");
-          }
-          if (!confirmDiscard()) return;
-          if (localStorage.getItem(STORAGE_KEY) && !window.confirm("Replace the notebook currently saved in this browser with this backup?")) return;
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(content));
-          cryptoKey = null;
-          vault = null;
-          notes = [];
-          activeId = null;
-          dirty = false;
-          workspace.classList.add("hidden");
-          $("topActions").classList.add("hidden");
-          lockScreen.classList.remove("hidden");
-          $("lockTitle").textContent = "Welcome back";
-          $("lockDescription").textContent = "Backup loaded. Enter the passcode that was used when this backup was created.";
-          $("passLabel").textContent = "Passcode";
-          $("confirmWrap").classList.add("hidden");
-          $("unlockBtn").textContent = "Unlock notebook";
-          passInput.value = "";
-          showStatus("Backup loaded. Enter its original passcode to unlock it.");
-        } catch (error) {
-          showStatus(error.message || "Could not read that backup file.", true);
-        } finally {
-          $("restoreInput").value = "";
-        }
-      }
-
-      lockForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const passcode = passInput.value;
-        const hasVault = !!localStorage.getItem(STORAGE_KEY);
-        $("unlockBtn").disabled = true;
-        showStatus("Working...");
-        try {
-          if (!window.crypto || !crypto.subtle) throw new Error("Secure encryption is not available here. Open this website using its HTTPS GitHub Pages address.");
-          if (hasVault) {
-            await unlock(passcode);
-          } else {
-            if (passcode.length < 6) throw new Error("Use at least 6 characters for your passcode.");
-            if (passcode !== confirmInput.value) throw new Error("The passcodes do not match.");
-            const salt = randomBytes(16);
-            cryptoKey = await deriveKey(passcode, salt);
-            vault = await encryptNotes({ notes: [] }, cryptoKey, salt);
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(vault));
-            notes = [];
-            lockScreen.classList.add("hidden");
-            workspace.classList.remove("hidden");
-            $("topActions").classList.remove("hidden");
-            refreshNoteList();
-          }
-        } catch (error) {
-          showStatus(error.name === "OperationError" ? "Incorrect passcode. Please try again." : error.message, true);
-        } finally {
-          $("unlockBtn").disabled = false;
-        }
-      });
-      $("newBtn").addEventListener("click", createNote);
-      $("saveBtn").addEventListener("click", saveActiveNote);
-      $("deleteBtn").addEventListener("click", deleteActiveNote);
-      $("lockBtn").addEventListener("click", lock);
-      $("exportBtn").addEventListener("click", downloadBackup);
-      $("restoreBtn").addEventListener("click", () => $("restoreInput").click());
-      $("restoreInput").addEventListener("change", event => {
-        const file = event.target.files && event.target.files[0];
-        if (file) restoreBackup(file);
-      });
-      $("searchInput").addEventListener("input", refreshNoteList);
-      $("noteTitle").addEventListener("input", () => setDirty(true));
-      $("noteBody").addEventListener("input", () => {
-        setDirty(true);
-        $("charCount").textContent = `${$("noteBody").value.length.toLocaleString()} characters`;
-      });
-      document.addEventListener("keydown", event => {
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && !workspace.classList.contains("hidden")) {
-          event.preventDefault();
-          saveActiveNote();
-        }
-      });
-
-      // Show the correct first-run or returning-user screen.
-      const hasExistingVault = !!localStorage.getItem(STORAGE_KEY);
-      $("lockTitle").textContent = hasExistingVault ? "Welcome back" : "Welcome to your notebook";
-      $("lockDescription").textContent = hasExistingVault
-        ? "Enter your passcode to unlock your encrypted notes."
-        : "Set a passcode to protect your notebook. You will use it whenever you open this notebook in this browser.";
-      $("passLabel").textContent = hasExistingVault ? "Passcode" : "Create a passcode";
-      $("confirmWrap").classList.toggle("hidden", hasExistingVault);
-      $("unlockBtn").textContent = hasExistingVault ? "Unlock notebook" : "Create notebook";
-    })();
+    }
+    function openNote(id){const n=notes.find(x=>x.id===id);if(!n)return;activeId=id;$("emptyEditor").classList.add("hidden");$("editForm").classList.remove("hidden");$("noteTitle").value=n.title;$("noteBody").value=n.body;$("dateMeta").textContent=`Created ${dateFmt(n.createdAt)} · Last edited ${dateFmt(n.updatedAt)}`;$("charCount").textContent=n.body.length.toLocaleString()+" characters";setDirty(false);refreshNoteList();}
+    async function loadNotes(){const rows=await request("?select=id,title,content,created_at,updated_at&order=updated_at.desc");notes=rows.map(fromRow);refreshNoteList();}
+    async function saveNote(){if(!activeId||busy)return;const n=notes.find(x=>x.id===activeId);if(!n)return;busy=true;$("saveBtn").disabled=true;
+      const title=$("noteTitle").value.trim()||"Untitled note",body=$("noteBody").value,updatedAt=Date.now();
+      try{await request("?id=eq."+encodeURIComponent(n.id),{method:"PATCH",headers:{Prefer:"return=minimal"},body:JSON.stringify({title,content:body,updated_at:new Date(updatedAt).toISOString()})});Object.assign(n,{title,body,updatedAt});setDirty(false);openNote(n.id);}catch(e){errorMessage(e);}finally{busy=false;$("saveBtn").disabled=false;}
+    }
+    async function createNote(){if(!confirmDiscard())return;const now=Date.now(),n={id:crypto.randomUUID(),title:"",body:"",createdAt:now,updatedAt:now};try{await request("",{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(toRow(n))});notes.unshift(n);openNote(n.id);$("noteTitle").focus();}catch(e){errorMessage(e);}}
+    async function deleteNote(){if(!activeId||!confirm("Permanently delete this note?"))return;try{await request("?id=eq."+encodeURIComponent(activeId),{method:"DELETE",headers:{Prefer:"return=minimal"}});notes=notes.filter(n=>n.id!==activeId);activeId=null;setDirty(false);$("editForm").classList.add("hidden");$("emptyEditor").classList.remove("hidden");refreshNoteList();}catch(e){errorMessage(e);}}
+    function exportBackup(){const blob=new Blob([JSON.stringify({app:"my-notebook-cloud",notes:notes.map(toRow),exportedAt:new Date().toISOString()},null,2)],{type:"application/json"});const url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="my-notebook-cloud-"+new Date().toISOString().slice(0,10)+".json";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+    function base64ToBytes(value){return Uint8Array.from(atob(value),c=>c.charCodeAt(0));}
+    async function decryptOldVault(record,passcode){
+      const material=await crypto.subtle.importKey("raw",new TextEncoder().encode(passcode),"PBKDF2",false,["deriveKey"]);
+      const key=await crypto.subtle.deriveKey({name:"PBKDF2",salt:base64ToBytes(record.salt),iterations:record.iterations||310000,hash:"SHA-256"},material,{name:"AES-GCM",length:256},false,["decrypt"]);
+      const plain=await crypto.subtle.decrypt({name:"AES-GCM",iv:base64ToBytes(record.iv)},key,base64ToBytes(record.data));
+      const parsed=JSON.parse(new TextDecoder().decode(plain));if(!Array.isArray(parsed.notes))throw new Error("Invalid old notebook data");return parsed.notes;
+    }
+    async function importOld(){
+      if(!confirmDiscard())return;
+      const picker=$("restoreInput");picker.value="";
+      picker.onchange=async()=>{const file=picker.files[0];if(!file)return;try{
+        const vault=JSON.parse(await file.text());if(vault.app!=="my-notebook"||vault.version!==1||!vault.salt||!vault.iv||!vault.data)throw new Error("Select an encrypted backup from the original notebook.");
+        const oldPin=prompt("Enter the OLD notebook passcode to decrypt this backup:");if(oldPin===null)return;
+        const oldNotes=await decryptOldVault(vault,oldPin);if(!confirm(`Import ${oldNotes.length} old notes into the online database? Existing notes with the same ID will be updated.`))return;
+        let count=0;for(const n of oldNotes){const now=Date.now();const row=toRow({id:n.id||crypto.randomUUID(),title:n.title||"",body:n.body||"",createdAt:n.createdAt||now,updatedAt:n.updatedAt||now});await request("?on_conflict=id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(row)});count++;}
+        await loadNotes();alert(`Imported ${count} notes. Your original browser data has not been deleted.`);
+      }catch(e){errorMessage(e);}};picker.click();
+    }
+    async function unlock(e){e.preventDefault();const status=$("lockStatus");if($("passcode").value!==PIN){status.textContent="Incorrect PIN";return;}status.textContent="Loading notes...";$("unlockBtn").disabled=true;try{await loadNotes();$("lockScreen").classList.add("hidden");$("workspace").classList.remove("hidden");$("topActions").classList.remove("hidden");status.textContent="";}catch(err){status.textContent="Could not load notes: "+err.message;}finally{$("unlockBtn").disabled=false;}}
+    function lock(){if(!confirmDiscard())return;notes=[];activeId=null;setDirty(false);$("workspace").classList.add("hidden");$("topActions").classList.add("hidden");$("lockScreen").classList.remove("hidden");$("passcode").value="";}
+    $("lockTitle").textContent="Welcome back";$("passLabel").textContent="Notebook PIN";
+    $("lockForm").addEventListener("submit",unlock);$("newBtn").addEventListener("click",createNote);$("saveBtn").addEventListener("click",saveNote);$("deleteBtn").addEventListener("click",deleteNote);$("lockBtn").addEventListener("click",lock);$("exportBtn").addEventListener("click",exportBackup);$("importBtn").addEventListener("click",importOld);$("searchInput").addEventListener("input",refreshNoteList);
+    $("noteTitle").addEventListener("input",()=>setDirty(true));$("noteBody").addEventListener("input",()=>{setDirty(true);$("charCount").textContent=$("noteBody").value.length.toLocaleString()+" characters";});
+    document.addEventListener("keydown",e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="s"&&!$("workspace").classList.contains("hidden")){e.preventDefault();saveNote();}});
+    window.addEventListener("beforeunload",e=>{if(dirty){e.preventDefault();e.returnValue="";}});
+  })();
   </script>
 </body>
 </html>
