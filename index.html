@@ -33,6 +33,8 @@
     h1 { font-size: 21px; letter-spacing: -.5px; margin: 0; }
     .subtitle { color: var(--muted); font-size: 12px; margin-top: 3px; }
     .top-actions { display: flex; align-items: center; gap: 8px; }
+    .notebook-tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+    .notebook-tab.active { background: var(--accent); color: white; border-color: var(--accent); }
     .btn { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 10px; padding: 9px 13px; font-size: 13px; font-weight: 600; }
     .btn:hover { border-color: #c9c4b7; }
     .btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
@@ -107,35 +109,39 @@
         <div class="brand-mark">✎</div>
         <div><h1>My Notebook</h1><div class="subtitle">A quiet place for thoughts</div></div>
       </div>
-      <div class="top-actions hidden" id="topActions">
+      <div class="top-actions" id="topActions">
         <button class="btn" id="importBtn">Import old notes</button>
         <button class="btn" id="exportBtn">Export backup</button>
-        <button class="btn" id="lockBtn">Lock</button>
+        <button class="btn hidden" id="signOutBtn">Sign out</button>
       </div>
     </header>
 
-    <section class="lock-card" id="lockScreen">
+    <nav class="notebook-tabs" aria-label="Notebook type">
+      <button class="btn notebook-tab active" id="publicTab" type="button" aria-pressed="true">Public notes</button>
+      <button class="btn notebook-tab" id="privateTab" type="button" aria-pressed="false">Private notes</button>
+    </nav>
+
+    <section class="lock-card hidden" id="privateLogin">
       <div class="lock-icon">⌑</div>
-      <h2 id="lockTitle">Welcome to your notebook</h2>
-      <p id="lockDescription">Enter your PIN to open notes stored online, from any device.</p>
-      <form id="lockForm">
-        <label for="passcode" id="passLabel">Enter PIN</label>
-        <input id="passcode" type="password" autocomplete="off" inputmode="numeric" maxlength="12" required placeholder="Enter PIN">
-        
-        <button class="btn primary" id="unlockBtn" type="submit">Open notebook</button>
+      <h2>Sign in to private notes</h2>
+      <p>Use the same Supabase admin email and password as the cat website. These private notes are shared between both sites, and only a site admin can open them.</p>
+      <form id="privateLoginForm">
+        <label for="privateEmail">Admin email</label>
+        <input id="privateEmail" type="email" autocomplete="username" required>
+        <label for="privatePassword">Password</label>
+        <input id="privatePassword" type="password" autocomplete="current-password" required>
+        <button class="btn primary" id="privateLoginButton" type="submit">Sign in</button>
       </form>
-      <div class="status" id="lockStatus" role="status"></div>
-      
-      <input type="file" id="restoreInput" accept="application/json,.json" class="hidden">
-      <div class="notice">Notes are stored online in a publicly writable database. The PIN is only a convenience screen lock; it does not secure the data. Do not store sensitive information.</div>
+      <div class="status" id="privateLoginStatus" role="status" aria-live="polite"></div>
     </section>
 
-    <section class="workspace hidden" id="workspace">
+    <input type="file" id="restoreInput" accept="application/json,.json" class="hidden">
+    <section class="workspace" id="workspace">
       <aside class="sidebar">
-        <div class="side-head"><strong>Your notes</strong><button class="new-btn" id="newBtn">＋ New note</button></div>
+        <div class="side-head"><strong id="notesHeading">Public notes</strong><button class="new-btn" id="newBtn">＋ New note</button></div>
         <input class="search" id="searchInput" type="search" placeholder="Search notes..." aria-label="Search notes">
         <div class="note-list" id="noteList"></div>
-        <div class="sidebar-foot"><p class="hint">Notes are stored online and available on other devices. Save your changes before switching notes.</p></div>
+        <div class="sidebar-foot"><p class="hint" id="notesHint">Public notes can be viewed and changed by anyone with access to this website. Do not store sensitive information.</p></div>
       </aside>
       <section class="editor" id="editorPanel">
         <div class="empty-editor" id="emptyEditor"><div><strong>Your notebook is empty</strong>Create a note to get started.</div></div>
@@ -160,20 +166,38 @@
     "use strict";
     const PROJECT_URL = "https://oiyclihezrhhvncyumds.supabase.co";
     const PUBLISHABLE_KEY = "sb_publishable_zKqOp6hILe9SbOtvrysyrw_hN5NLNA_";
-    const PIN = "0928"; // UI-only convenience PIN, visible in page source
-    const STORAGE_KEY = "my-notebook-encrypted-v1";
-    const API = PROJECT_URL + "/rest/v1/notes";
+    const API_PATHS = {
+      public: "/rest/v1/notebook_notes",
+      private: "/rest/v1/notes"
+    };
     const $ = id => document.getElementById(id);
     let notes = [], activeId = null, dirty = false, busy = false;
+    let notebookMode = "public", privateSession = null;
     const dateFmt = value => new Intl.DateTimeFormat(undefined,{year:"numeric",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}).format(new Date(value));
     function setDirty(value) {dirty=value;$("saveState").textContent=value?"Unsaved changes":"All changes saved";}
     function confirmDiscard() {return !dirty || confirm("Discard unsaved changes?");}
     function errorMessage(e) {alert(e.message || String(e));}
     async function request(path="", options={}) {
-      const response=await fetch(API+path,{...options,headers:{apikey:PUBLISHABLE_KEY,Authorization:"Bearer "+PUBLISHABLE_KEY,"Content-Type":"application/json",...(options.headers||{})}});
+      if(notebookMode==="private"){
+        if(!privateSession)throw new Error("Sign in to access private notes.");
+        if(privateSession.expires_at<=Math.floor(Date.now()/1000)+60){
+          const refreshed=await authRequest("/auth/v1/token?grant_type=refresh_token",{refresh_token:privateSession.refresh_token});
+          privateSession={...refreshed,expires_at:refreshed.expires_at||Math.floor(Date.now()/1000)+refreshed.expires_in};
+        }
+      }
+      const headers={apikey:PUBLISHABLE_KEY,Authorization:"Bearer "+(notebookMode==="private"&&privateSession?privateSession.access_token:PUBLISHABLE_KEY),"Content-Type":"application/json",...(options.headers||{})};
+      const response=await fetch(PROJECT_URL+API_PATHS[notebookMode]+path,{...options,headers});
       if(!response.ok)throw new Error("Supabase returned "+response.status+": "+(await response.text()).slice(0,400));
       if(response.status===204)return null;
       const text=await response.text();return text?JSON.parse(text):null;
+    }
+    async function authRequest(path, body, session, method="POST") {
+      const headers={apikey:PUBLISHABLE_KEY,"Content-Type":"application/json"};
+      if(session)headers.Authorization="Bearer "+session.access_token;
+      const response=await fetch(PROJECT_URL+path,{method,headers,body:method==="GET"?undefined:JSON.stringify(body)});
+      const text=await response.text();
+      if(!response.ok)throw new Error("Supabase authentication failed: "+text.slice(0,400));
+      return text?JSON.parse(text):null;
     }
     const fromRow=r=>({id:r.id,title:r.title||"",body:r.content||"",createdAt:Date.parse(r.created_at),updatedAt:Date.parse(r.updated_at)});
     const toRow=n=>({id:n.id,title:n.title||"Untitled note",content:n.body||"",created_at:new Date(n.createdAt).toISOString(),updated_at:new Date(n.updatedAt).toISOString()});
@@ -213,13 +237,48 @@
         await loadNotes();alert(`Imported ${count} notes. Your original browser data has not been deleted.`);
       }catch(e){errorMessage(e);}};picker.click();
     }
-    async function unlock(e){e.preventDefault();const status=$("lockStatus");if($("passcode").value!==PIN){status.textContent="Incorrect PIN";return;}status.textContent="Loading notes...";$("unlockBtn").disabled=true;try{await loadNotes();$("lockScreen").classList.add("hidden");$("workspace").classList.remove("hidden");$("topActions").classList.remove("hidden");status.textContent="";}catch(err){status.textContent="Could not load notes: "+err.message;}finally{$("unlockBtn").disabled=false;}}
-    function lock(){if(!confirmDiscard())return;notes=[];activeId=null;setDirty(false);$("workspace").classList.add("hidden");$("topActions").classList.add("hidden");$("lockScreen").classList.remove("hidden");$("passcode").value="";}
-    $("lockTitle").textContent="Welcome back";$("passLabel").textContent="Notebook PIN";
-    $("lockForm").addEventListener("submit",unlock);$("newBtn").addEventListener("click",createNote);$("saveBtn").addEventListener("click",saveNote);$("deleteBtn").addEventListener("click",deleteNote);$("lockBtn").addEventListener("click",lock);$("exportBtn").addEventListener("click",exportBackup);$("importBtn").addEventListener("click",importOld);$("searchInput").addEventListener("input",refreshNoteList);
+    function resetEditor(){activeId=null;$("editForm").classList.add("hidden");$("emptyEditor").classList.remove("hidden");$("noteTitle").value="";$("noteBody").value="";$("dateMeta").textContent="New note";$("charCount").textContent="0 characters";setDirty(false);}
+    async function switchNotebook(mode, discardConfirmed=false){
+      if(mode===notebookMode&&!(mode==="private"&&!privateSession))return;
+      if(!discardConfirmed&&!confirmDiscard())return;
+      notebookMode=mode;notes=[];resetEditor();$("searchInput").value="";
+      $("publicTab").classList.toggle("active",mode==="public");$("publicTab").setAttribute("aria-pressed",String(mode==="public"));
+      $("privateTab").classList.toggle("active",mode==="private");$("privateTab").setAttribute("aria-pressed",String(mode==="private"));
+      $("notesHeading").textContent=mode==="public"?"Public notes":"Private notes";
+      $("notesHint").textContent=mode==="public"?"Public notes can be viewed and changed by anyone with access to this website. Do not store sensitive information.":"These private notes are shared with the cat website and available only to signed-in site administrators.";
+      $("signOutBtn").classList.toggle("hidden",mode!=="private"||!privateSession);
+      if(mode==="private"&&!privateSession){$("workspace").classList.add("hidden");$("privateLogin").classList.remove("hidden");$("privateLoginStatus").textContent="";$("privateEmail").focus();return;}
+      $("privateLogin").classList.add("hidden");$("workspace").classList.remove("hidden");
+      try{await loadNotes();}catch(error){$("noteList").textContent="Could not load notes: "+error.message;}
+    }
+    async function signInPrivate(event){
+      event.preventDefault();
+      const button=$("privateLoginButton"),status=$("privateLoginStatus");
+      button.disabled=true;status.textContent="Signing in...";
+      try{
+        const session=await authRequest("/auth/v1/token?grant_type=password",{email:$("privateEmail").value.trim(),password:$("privatePassword").value});
+        const admins=await authRequest("/rest/v1/site_admins?select=user_id&user_id=eq."+encodeURIComponent(session.user.id)+"&limit=1",{},session,"GET");
+        if(!Array.isArray(admins)||admins.length===0)throw new Error("This account is not a site admin. Sign in with the admin account used on the cat website.");
+        privateSession={...session,expires_at:session.expires_at||Math.floor(Date.now()/1000)+session.expires_in};
+        await loadNotes();
+        $("privatePassword").value="";$("privateLogin").classList.add("hidden");$("workspace").classList.remove("hidden");$("signOutBtn").classList.remove("hidden");
+      }catch(error){privateSession=null;notes=[];resetEditor();status.textContent=error.message;}finally{button.disabled=false;}
+    }
+    async function signOutPrivate(){
+      if(!confirmDiscard())return;
+      const session=privateSession;
+      if(session){try{await authRequest("/auth/v1/logout",{},session);}catch(error){console.error("Could not revoke the private notebook session.",error);}}
+      privateSession=null;
+      if(notebookMode==="private"){dirty=false;await switchNotebook("public",true);}
+      else $("signOutBtn").classList.add("hidden");
+    }
+    $("publicTab").addEventListener("click",()=>switchNotebook("public"));$("privateTab").addEventListener("click",()=>switchNotebook("private"));
+    $("privateLoginForm").addEventListener("submit",signInPrivate);
+    $("newBtn").addEventListener("click",createNote);$("saveBtn").addEventListener("click",saveNote);$("deleteBtn").addEventListener("click",deleteNote);$("signOutBtn").addEventListener("click",signOutPrivate);$("exportBtn").addEventListener("click",exportBackup);$("importBtn").addEventListener("click",importOld);$("searchInput").addEventListener("input",refreshNoteList);
     $("noteTitle").addEventListener("input",()=>setDirty(true));$("noteBody").addEventListener("input",()=>{setDirty(true);$("charCount").textContent=$("noteBody").value.length.toLocaleString()+" characters";});
     document.addEventListener("keydown",e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="s"&&!$("workspace").classList.contains("hidden")){e.preventDefault();saveNote();}});
     window.addEventListener("beforeunload",e=>{if(dirty){e.preventDefault();e.returnValue="";}});
+    loadNotes().catch(error=>{$("noteList").textContent="Could not load public notes: "+error.message;});
   })();
   </script>
 </body>
